@@ -107,9 +107,9 @@ async def notify_managers(bot: Bot, text: str, document_path: str | None = None)
 async def finalize_trip(bot: Bot, trip_id: int):
     db.mark_trip_finished(trip_id)  # спершу статус/дата — щоб звіт вже бачив фінальний стан
     report_path = reports.build_trip_report(trip_id)
-    onedrive_url = onedrive.upload_trip_report(trip_id, report_path)
+    onedrive_url = await asyncio.to_thread(onedrive.upload_trip_report, trip_id, report_path)
     db.set_trip_report(trip_id, report_path=report_path, onedrive_url=onedrive_url)
-    onedrive.update_dashboard_row(trip_id, onedrive_url)
+    await asyncio.to_thread(onedrive.update_dashboard_row, trip_id, onedrive_url)
 
     trip = db.get_trip(trip_id)
     driver = db.get_driver(trip["driver_id"])
@@ -384,7 +384,7 @@ async def got_checklist_photo(message: Message, state: FSMContext):
     local_path = os.path.join(config.PHOTOS_DIR, f"reys{trip_id}_{item_key}_{photo.file_unique_id}.jpg")
     await message.bot.download_file(file.file_path, destination=local_path)
 
-    onedrive_url = onedrive.upload_trip_photo(trip_id, local_path)
+    onedrive_url = await asyncio.to_thread(onedrive.upload_trip_photo, trip_id, local_path)
     db.add_photo(trip_id, step_id, item_key, local_path, kind="checklist", onedrive_url=onedrive_url)
     db.mark_item_checked(trip_id, step_id, item_key)
 
@@ -514,7 +514,7 @@ async def optional_got_photo(message: Message, state: FSMContext):
         config.PHOTOS_DIR, f"{data['event_type']}_reys{data['trip_id']}_{photo.file_unique_id}.jpg"
     )
     await message.bot.download_file(file.file_path, destination=local_path)
-    onedrive_url = onedrive.upload_trip_photo(data["trip_id"], local_path)
+    onedrive_url = await asyncio.to_thread(onedrive.upload_trip_photo, data["trip_id"], local_path)
     db.add_photo(data["trip_id"], data["context_step"], None, local_path, kind=data["event_type"], onedrive_url=onedrive_url)
     await finish_optional_event(message, state, data, photo_path=local_path)
 
@@ -572,7 +572,7 @@ async def incident_got_photo(message: Message, state: FSMContext):
     file = await message.bot.get_file(photo.file_id)
     local_path = os.path.join(config.PHOTOS_DIR, f"incident_reys{trip_id}_{photo.file_unique_id}.jpg")
     await message.bot.download_file(file.file_path, destination=local_path)
-    onedrive_url = onedrive.upload_trip_photo(trip_id, local_path)
+    onedrive_url = await asyncio.to_thread(onedrive.upload_trip_photo, trip_id, local_path)
     db.add_photo(trip_id, context_step, None, local_path, kind="incident", onedrive_url=onedrive_url)
 
     await finish_incident(message, trip_id, context_step, description, local_path)

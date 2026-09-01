@@ -20,6 +20,7 @@ credentials) — на основі звичайного посилання "По
 import os
 import base64
 import logging
+import time
 from datetime import datetime
 
 import msal
@@ -89,27 +90,57 @@ def upload_file(local_path: str, remote_subpath: str) -> str | None:
     їх ще немає — окремо створювати нічого не потрібно.
     Повертає webUrl файлу, або None якщо OneDrive не налаштований чи
     стався збій (файл лишається доступним локально — рейс не втрачається).
+
+    На тимчасові помилки (423 Locked — файл на секунду зайнятий після
+    створення/хтось відкрив у Word Online; 429 — перевищено ліміт запитів;
+    503 — Graph тимчасово недоступний) робимо кілька повторних спроб із
+    паузою, а не здаємось одразу.
     """
     if not config.ONEDRIVE_ENABLED:
         log.info("OneDrive не налаштований — файл %s лишається тільки локально", local_path)
         return None
 
-    try:
-        token = _get_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        drive_id, item_id = _resolve_base_folder(headers)
+    RETRYABLE_STATUSES = {423, 429, 503}
+    MAX_ATTEMPTS = 4
+    DELAYS = [3, 8, 20]  # секунди між спробами (зростаюча пауза)
 
-        with open(local_path, "rb") as f:
-            data = f.read()
+    with open(local_path, "rb") as f:
+        data = f.read()
+    remote_subpath = remote_subpath.replace("//", "/").lstrip("/")
 
-        remote_subpath = remote_subpath.replace("//", "/").lstrip("/")
-        url = f"{GRAPH_ROOT}/drives/{drive_id}/items/{item_id}:/{remote_subpath}:/content"
-        resp = requests.put(url, headers=headers, data=data, timeout=60)
-        resp.raise_for_status()
-        return resp.json().get("webUrl")
-    except Exception as e:
-        log.error("Помилка завантаження на OneDrive (%s): %s", local_path, e)
-        return None
+    last_error = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            token = _get_token()
+            headers = {"Authorization": f"Bearer {token}"}
+            drive_id, item_id = _resolve_base_folder(headers)
+
+            url = f"{GRAPH_ROOT}/drives/{drive_id}/items/{item_id}:/{remote_subpath}:/content"
+            resp = requests.put(url, headers=headers, data=data, timeout=60)
+
+            if resp.status_code in RETRYABLE_STATUSES and attempt < MAX_ATTEMPTS:
+                delay = DELAYS[attempt - 1]
+                log.warning(
+                    "OneDrive: тимчасова помилка %s для %s (спроба %d/%d), повтор через %ds",
+                    resp.status_code, remote_subpath, attempt, MAX_ATTEMPTS, delay,
+                )
+                time.sleep(delay)
+                continue
+
+            resp.raise_for_status()
+            return resp.json().get("webUrl")
+        except Exception as e:
+            last_error = e
+            if attempt < MAX_ATTEMPTS:
+                delay = DELAYS[attempt - 1]
+                log.warning(
+                    "OneDrive: помилка завантаження %s (спроба %d/%d): %s — повтор через %ds",
+                    remote_subpath, attempt, MAX_ATTEMPTS, e, delay,
+                )
+                time.sleep(delay)
+
+    log.error("Помилка завантаження на OneDrive (%s) після %d спроб: %s", local_path, MAX_ATTEMPTS, last_error)
+    return None
 
 
 def _ensure_local_dashboard():
