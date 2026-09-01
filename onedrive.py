@@ -1,21 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 Інтеграція з OneDrive/SharePoint через Microsoft Graph (app-only, client
-credentials) — на основі звичайного посилання "Поділитися" на папку
-(MS_SHARE_URL в .env), а не UPN користувача.
+credentials). Підтримує КІЛЬКА проєктів одночасно (config.PROJECTS) —
+кожен проєкт має свою окрему папку на OneDrive, свою структуру дат і
+свій окремий dashboard.xlsx у корені своєї папки.
 
 Потрібні змінні оточення (див. .env.example):
-    MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, MS_SHARE_URL
+    MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, PROJECTS_JSON (або MS_SHARE_URL)
 
 Логіка дат: перед кожним завантаженням бот кладе файл у підпапку з
-сьогоднішньою датою (YYYY-MM-DD) всередині вашої спільної папки. Якщо
-такої підпапки ще немає — Graph API створює її автоматично (просте
-завантаження через шлях створює всі відсутні проміжні папки, окремо
-нічого створювати не потрібно).
+сьогоднішньою датою (YYYY-MM-DD) всередині папки ПРОЄКТУ цього рейсу.
+Якщо такої підпапки ще немає — Graph API створює її автоматично.
 
 Якщо OneDrive ще не налаштований — ONEDRIVE_ENABLED=False і всі функції
-тихо пропускають завантаження (файли лишаються тільки локально в data/),
-щоб бот залишався робочим без хмари під час першого тестування.
+тихо пропускають завантаження (файли лишаються тільки локально в data/).
 """
 import os
 import base64
@@ -38,8 +36,9 @@ DASHBOARD_HEADERS = [
     "Початок", "Завершення", "Статус", "Паузи", "Дод. зупинки", "ЧП", "Звіт (OneDrive)",
 ]
 
-# Резолвимо посилання на папку один раз і кешуємо (drive_id, item_id) в пам'яті процесу
-_base_folder_cache = None
+# Резолвимо посилання на папку кожного проєкту один раз і кешуємо
+# (drive_id, item_id) в пам'яті процесу, окремо на кожен project_key.
+_project_folder_cache: dict[str, tuple[str, str]] = {}
 
 
 def _get_token():
@@ -61,43 +60,49 @@ def _encode_share_url(url: str) -> str:
     return "u!" + b64
 
 
-def _resolve_base_folder(headers):
-    """Повертає (drive_id, item_id) папки з MS_SHARE_URL. Кешується в пам'яті."""
-    global _base_folder_cache
-    if _base_folder_cache:
-        return _base_folder_cache
+def _resolve_project_folder(headers, project_key: str):
+    """Повертає (drive_id, item_id) папки конкретного проєкту. Кешується в пам'яті."""
+    if project_key in _project_folder_cache:
+        return _project_folder_cache[project_key]
 
-    share_id = _encode_share_url(config.MS_SHARE_URL)
+    project = config.PROJECTS_BY_KEY.get(project_key)
+    if not project:
+        raise RuntimeError(f"Проєкт '{project_key}' не знайдено в конфігурації (config.PROJECTS)")
+
+    share_id = _encode_share_url(project["share_url"])
     url = f"{GRAPH_ROOT}/shares/{share_id}/driveItem"
     resp = requests.get(url, headers=headers, timeout=30)
     resp.raise_for_status()
     item = resp.json()
     drive_id = item["parentReference"]["driveId"]
     item_id = item["id"]
-    _base_folder_cache = (drive_id, item_id)
-    log.info("OneDrive: цільову папку розпізнано (drive=%s, item=%s)", drive_id, item_id)
-    return _base_folder_cache
+    _project_folder_cache[project_key] = (drive_id, item_id)
+    log.info("OneDrive: папку проєкту '%s' розпізнано (drive=%s, item=%s)", project_key, drive_id, item_id)
+    return _project_folder_cache[project_key]
 
 
 def _today_folder_name() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def upload_file(local_path: str, remote_subpath: str) -> str | None:
+def upload_file(local_path: str, remote_subpath: str, project_key: str) -> str | None:
     """
-    Завантажує файл у {спільна папка}/{remote_subpath} на OneDrive.
-    Проміжні папки (в т.ч. папка з датою) створюються автоматично, якщо
-    їх ще немає — окремо створювати нічого не потрібно.
-    Повертає webUrl файлу, або None якщо OneDrive не налаштований чи
+    Завантажує файл у {папка проєкту}/{remote_subpath} на OneDrive.
+    Проміжні папки (в т.ч. папка з датою) створюються автоматично.
+    Повертає webUrl файлу, або None якщо OneDrive/проєкт не налаштовані чи
     стався збій (файл лишається доступним локально — рейс не втрачається).
 
-    На тимчасові помилки (423 Locked — файл на секунду зайнятий після
-    створення/хтось відкрив у Word Online; 429 — перевищено ліміт запитів;
-    503 — Graph тимчасово недоступний) робимо кілька повторних спроб із
-    паузою, а не здаємось одразу.
+    На тимчасові помилки (423 Locked, 429, 503) робимо кілька повторних
+    спроб із паузою, а не здаємось одразу.
     """
     if not config.ONEDRIVE_ENABLED:
         log.info("OneDrive не налаштований — файл %s лишається тільки локально", local_path)
+        return None
+    if not project_key or project_key not in config.PROJECTS_BY_KEY:
+        log.warning(
+            "OneDrive: невідомий або відсутній проєкт ('%s') для %s — файл лишається тільки локально",
+            project_key, local_path,
+        )
         return None
 
     RETRYABLE_STATUSES = {423, 429, 503}
@@ -113,7 +118,7 @@ def upload_file(local_path: str, remote_subpath: str) -> str | None:
         try:
             token = _get_token()
             headers = {"Authorization": f"Bearer {token}"}
-            drive_id, item_id = _resolve_base_folder(headers)
+            drive_id, item_id = _resolve_project_folder(headers, project_key)
 
             url = f"{GRAPH_ROOT}/drives/{drive_id}/items/{item_id}:/{remote_subpath}:/content"
             resp = requests.put(url, headers=headers, data=data, timeout=60)
@@ -121,8 +126,8 @@ def upload_file(local_path: str, remote_subpath: str) -> str | None:
             if resp.status_code in RETRYABLE_STATUSES and attempt < MAX_ATTEMPTS:
                 delay = DELAYS[attempt - 1]
                 log.warning(
-                    "OneDrive: тимчасова помилка %s для %s (спроба %d/%d), повтор через %ds",
-                    resp.status_code, remote_subpath, attempt, MAX_ATTEMPTS, delay,
+                    "OneDrive: тимчасова помилка %s для [%s] %s (спроба %d/%d), повтор через %ds",
+                    resp.status_code, project_key, remote_subpath, attempt, MAX_ATTEMPTS, delay,
                 )
                 time.sleep(delay)
                 continue
@@ -134,37 +139,42 @@ def upload_file(local_path: str, remote_subpath: str) -> str | None:
             if attempt < MAX_ATTEMPTS:
                 delay = DELAYS[attempt - 1]
                 log.warning(
-                    "OneDrive: помилка завантаження %s (спроба %d/%d): %s — повтор через %ds",
-                    remote_subpath, attempt, MAX_ATTEMPTS, e, delay,
+                    "OneDrive: помилка завантаження [%s] %s (спроба %d/%d): %s — повтор через %ds",
+                    project_key, remote_subpath, attempt, MAX_ATTEMPTS, e, delay,
                 )
                 time.sleep(delay)
 
-    log.error("Помилка завантаження на OneDrive (%s) після %d спроб: %s", local_path, MAX_ATTEMPTS, last_error)
+    log.error(
+        "Помилка завантаження на OneDrive [%s] (%s) після %d спроб: %s",
+        project_key, local_path, MAX_ATTEMPTS, last_error,
+    )
     return None
 
 
-def _ensure_local_dashboard():
-    if not os.path.exists(config.DASHBOARD_PATH):
+def _ensure_local_dashboard(path: str):
+    if not os.path.exists(path):
         wb = Workbook()
         ws = wb.active
         ws.title = "Рейси"
         ws.append(DASHBOARD_HEADERS)
-        wb.save(config.DASHBOARD_PATH)
+        wb.save(path)
 
 
 def update_dashboard_row(trip_id: int, onedrive_report_url: str | None):
     """Додає/оновлює рядок зведеної таблиці по рейсу і синхронізує з OneDrive.
-    Дашборд лежить в корені спільної папки (не в підпапці з датою) —
-    це один загальний звід по всіх рейсах."""
-    _ensure_local_dashboard()
-
+    Кожен проєкт має СВІЙ dashboard.xlsx у корені СВОЄЇ папки (не в
+    підпапці з датою) — окремий зведений список по кожному проєкту."""
     trip = db.get_trip(trip_id)
+    project_key = trip["project_key"]
+    dash_path = config.dashboard_path(project_key)
+    _ensure_local_dashboard(dash_path)
+
     driver = db.get_driver(trip["driver_id"])
     incidents = db.get_incidents(trip_id)
     pauses = db.get_optional_events(trip_id, "pause")
     extra_stops = db.get_optional_events(trip_id, "extra_stop")
 
-    wb = load_workbook(config.DASHBOARD_PATH)
+    wb = load_workbook(dash_path)
     ws = wb["Рейси"]
 
     target_row = None
@@ -196,17 +206,21 @@ def update_dashboard_row(trip_id: int, onedrive_report_url: str | None):
     else:
         ws.append(values)
 
-    wb.save(config.DASHBOARD_PATH)
-    return upload_file(config.DASHBOARD_PATH, "dashboard.xlsx")
+    wb.save(dash_path)
+    if not project_key:
+        return None
+    return upload_file(dash_path, "dashboard.xlsx", project_key)
 
 
 def upload_trip_report(trip_id: int, report_path: str) -> str | None:
-    """Кладе звіт у підпапку сьогоднішньої дати: {дата}/reports/reys_N.docx"""
+    """Кладе звіт у папку проєкту, підпапка сьогоднішньої дати: {дата}/reports/reys_N.docx"""
+    trip = db.get_trip(trip_id)
     fname = os.path.basename(report_path)
-    return upload_file(report_path, f"{_today_folder_name()}/reports/{fname}")
+    return upload_file(report_path, f"{_today_folder_name()}/reports/{fname}", trip["project_key"])
 
 
 def upload_trip_photo(trip_id: int, photo_path: str) -> str | None:
-    """Кладе фото у підпапку сьогоднішньої дати: {дата}/photos/reys_N/файл.jpg"""
+    """Кладе фото у папку проєкту, підпапка сьогоднішньої дати: {дата}/photos/reys_N/файл.jpg"""
+    trip = db.get_trip(trip_id)
     fname = os.path.basename(photo_path)
-    return upload_file(photo_path, f"{_today_folder_name()}/photos/reys_{trip_id}/{fname}")
+    return upload_file(photo_path, f"{_today_folder_name()}/photos/reys_{trip_id}/{fname}", trip["project_key"])

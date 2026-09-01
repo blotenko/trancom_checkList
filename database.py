@@ -37,12 +37,16 @@ def init_db():
                 last_trailer TEXT,
                 last_cargo TEXT,
                 last_route TEXT,
+                last_project_key TEXT,
+                last_project_name TEXT,
                 created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS trips (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 driver_id INTEGER NOT NULL REFERENCES drivers(id),
+                project_key TEXT,
+                project_name TEXT,
                 tractor_number TEXT,
                 trailer_number TEXT,
                 cargo_description TEXT,
@@ -104,6 +108,18 @@ def init_db():
             );
             """
         )
+        # Міграція для баз, створених до появи проєктів (диск тепер
+        # персистентний, тож CREATE TABLE IF NOT EXISTS цього не додасть).
+        for stmt in (
+            "ALTER TABLE drivers ADD COLUMN last_project_key TEXT",
+            "ALTER TABLE drivers ADD COLUMN last_project_name TEXT",
+            "ALTER TABLE trips ADD COLUMN project_key TEXT",
+            "ALTER TABLE trips ADD COLUMN project_name TEXT",
+        ):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # колонка вже існує — нормально
 
 
 def wipe_all_data():
@@ -161,15 +177,25 @@ def update_driver_last_vehicle_cargo(driver_id, tractor, trailer, cargo, route):
         )
 
 
+def update_driver_last_project(driver_id, project_key, project_name):
+    with _lock, _conn() as conn:
+        conn.execute(
+            "UPDATE drivers SET last_project_key=?, last_project_name=? WHERE id=?",
+            (project_key, project_name, driver_id),
+        )
+
+
 # ---------- trips ----------
 
-def create_trip(driver_id, tractor_number, trailer_number, cargo_description, route=""):
+def create_trip(driver_id, tractor_number, trailer_number, cargo_description, route="",
+                 project_key=None, project_name=None):
     with _lock, _conn() as conn:
         cur = conn.execute(
-            """INSERT INTO trips (driver_id, tractor_number, trailer_number, cargo_description,
-                                   route, status, current_step, started_at)
-               VALUES (?,?,?,?,?, 'in_progress', 'loading_1', ?)""",
-            (driver_id, tractor_number, trailer_number, cargo_description, route, now()),
+            """INSERT INTO trips (driver_id, project_key, project_name, tractor_number, trailer_number,
+                                   cargo_description, route, status, current_step, started_at)
+               VALUES (?,?,?,?,?,?,?, 'in_progress', 'loading_1', ?)""",
+            (driver_id, project_key, project_name, tractor_number, trailer_number, cargo_description,
+             route, now()),
         )
         return cur.lastrowid
 

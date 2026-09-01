@@ -74,6 +74,21 @@ def route_decision_keyboard(route):
     return kb.as_markup()
 
 
+def project_decision_keyboard(project_name: str):
+    label = project_name if len(project_name) <= 40 else project_name[:37] + "..."
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text=f"🏗️ Той самий проєкт: {label}", callback_data="proj:same"))
+    kb.row(InlineKeyboardButton(text="🔀 Інший проєкт", callback_data="proj:other"))
+    return kb.as_markup()
+
+
+def project_list_keyboard(projects):
+    kb = InlineKeyboardBuilder()
+    for p in projects:
+        kb.row(InlineKeyboardButton(text=f"🏗️ {p['name']}", callback_data=f"projsel:{p['key']}"))
+    return kb.as_markup()
+
+
 def main_menu_keyboard(has_active_trip: bool):
     kb = InlineKeyboardBuilder()
     if has_active_trip:

@@ -76,7 +76,10 @@ def build_trip_report(trip_id: int) -> str:
     # --- Загальна інформація ---
     info_table = doc.add_table(rows=0, cols=2)
     info_table.alignment = WD_TABLE_ALIGNMENT.LEFT
-    info_rows = [
+    info_rows = []
+    if trip["project_name"]:
+        info_rows.append(("Проєкт", trip["project_name"]))
+    info_rows += [
         ("Водій", driver["full_name"] if driver else "—"),
         ("Телефон водія", driver["phone"] if driver and driver["phone"] else "—"),
         ("Тягач", trip["tractor_number"] or "—"),

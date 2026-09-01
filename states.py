@@ -8,6 +8,8 @@ class Registration(StatesGroup):
 
 
 class NewTrip(StatesGroup):
+    waiting_project_decision = State()   # "той самий проєкт" / "інший" (якщо є кешований)
+    waiting_project_choice = State()     # вибір проєкту зі списку
     waiting_vehicle_decision = State()   # "той самий" / "інший"
     waiting_new_tractor = State()
     waiting_new_trailer = State()

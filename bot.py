@@ -118,7 +118,8 @@ async def finalize_trip(bot: Bot, trip_id: int):
 
     summary = (
         f"✅ Рейс №{trip_id} завершено.\n"
-        f"Водій: {driver['full_name']}\n"
+        + (f"Проєкт: {trip['project_name']}\n" if trip["project_name"] else "")
+        + f"Водій: {driver['full_name']}\n"
         f"Авто: {trip['tractor_number']}"
         + (f" / {trip['trailer_number']}" if trip["trailer_number"] else "")
         + f"\nВантаж: {trip['cargo_description'] or '—'}\n"
@@ -205,16 +206,74 @@ async def reg_phone_text_fallback(message: Message, state: FSMContext):
 @router.callback_query(F.data == "new_trip")
 async def cb_new_trip(call: CallbackQuery, state: FSMContext):
     driver = db.get_driver_by_tg(call.from_user.id)
-    if driver["last_tractor"]:
-        await call.message.edit_text(
-            "Авто таке ж, як минулого разу?",
-            reply_markup=kb.vehicle_decision_keyboard(driver["last_tractor"], driver["last_trailer"]),
+
+    if not config.MULTI_PROJECT:
+        # Один проєкт (або жодного) — питати нема сенсу, просто підставляємо його мовчки.
+        proj = config.PROJECTS[0] if config.PROJECTS else None
+        await state.update_data(
+            project_key=proj["key"] if proj else None,
+            project_name=proj["name"] if proj else None,
         )
-        await state.set_state(NewTrip.waiting_vehicle_decision)
+        await proceed_to_vehicle_step(call.message, state, driver, edit=True)
+        await call.answer()
+        return
+
+    if driver["last_project_key"] and driver["last_project_key"] in config.PROJECTS_BY_KEY:
+        await call.message.edit_text(
+            "Той самий проєкт, що і минулого разу?",
+            reply_markup=kb.project_decision_keyboard(driver["last_project_name"] or driver["last_project_key"]),
+        )
+        await state.set_state(NewTrip.waiting_project_decision)
     else:
-        await call.message.edit_text("Введіть номер тягача:")
-        await state.set_state(NewTrip.waiting_new_tractor)
+        await call.message.edit_text("Оберіть проєкт для цього рейсу:", reply_markup=kb.project_list_keyboard(config.PROJECTS))
+        await state.set_state(NewTrip.waiting_project_choice)
     await call.answer()
+
+
+@router.callback_query(NewTrip.waiting_project_decision, F.data.startswith("proj:"))
+async def cb_project_decision(call: CallbackQuery, state: FSMContext):
+    driver = db.get_driver_by_tg(call.from_user.id)
+    choice = call.data.split(":", 1)[1]
+    if choice == "same":
+        await state.update_data(project_key=driver["last_project_key"], project_name=driver["last_project_name"])
+        await proceed_to_vehicle_step(call.message, state, driver, edit=True)
+    else:
+        await call.message.edit_text("Оберіть проєкт для цього рейсу:", reply_markup=kb.project_list_keyboard(config.PROJECTS))
+        await state.set_state(NewTrip.waiting_project_choice)
+    await call.answer()
+
+
+@router.callback_query(NewTrip.waiting_project_choice, F.data.startswith("projsel:"))
+async def cb_project_choice(call: CallbackQuery, state: FSMContext):
+    driver = db.get_driver_by_tg(call.from_user.id)
+    key = call.data.split(":", 1)[1]
+    project = config.PROJECTS_BY_KEY.get(key)
+    if not project:
+        await call.answer("Проєкт не знайдено, спробуйте ще раз.", show_alert=True)
+        return
+    await state.update_data(project_key=project["key"], project_name=project["name"])
+    await proceed_to_vehicle_step(call.message, state, driver, edit=True)
+    await call.answer()
+
+
+async def proceed_to_vehicle_step(target: Message, state: FSMContext, driver, edit: bool = False):
+    if driver["last_tractor"]:
+        text = "Авто таке ж, як минулого разу?"
+        markup = kb.vehicle_decision_keyboard(driver["last_tractor"], driver["last_trailer"])
+        state_to_set = NewTrip.waiting_vehicle_decision
+    else:
+        text = "Введіть номер тягача:"
+        markup = None
+        state_to_set = NewTrip.waiting_new_tractor
+
+    if edit:
+        try:
+            await target.edit_text(text, reply_markup=markup)
+        except Exception:
+            await target.answer(text, reply_markup=markup)
+    else:
+        await target.answer(text, reply_markup=markup)
+    await state.set_state(state_to_set)
 
 
 @router.callback_query(F.data == "continue_trip")
@@ -334,18 +393,24 @@ async def finalize_new_trip(target: Message, telegram_user_id: int, state: FSMCo
     data = await state.get_data()
     driver = db.get_driver_by_tg(telegram_user_id)
 
+    project_key = data.get("project_key")
+    project_name = data.get("project_name")
     tractor = data.get("tractor")
     trailer = data.get("trailer")
     cargo = data.get("cargo")
     route = data.get("route", "")
 
-    trip_id = db.create_trip(driver["id"], tractor, trailer, cargo, route)
+    trip_id = db.create_trip(driver["id"], tractor, trailer, cargo, route,
+                              project_key=project_key, project_name=project_name)
     db.update_driver_last_vehicle_cargo(driver["id"], tractor, trailer, cargo, route)
+    if project_key:
+        db.update_driver_last_project(driver["id"], project_key, project_name)
     await state.clear()
 
+    project_line = f"Проєкт: {project_name}\n" if project_name else ""
     await notify_managers(
         target.bot,
-        f"🚀 Новий рейс №{trip_id}\nВодій: {driver['full_name']}\n"
+        f"🚀 Новий рейс №{trip_id}\n{project_line}Водій: {driver['full_name']}\n"
         f"Авто: {tractor}" + (f" / {trailer}" if trailer else "")
         + f"\nВантаж: {cargo}\nМаршрут: {route or '—'}",
     )
@@ -701,8 +766,12 @@ async def cmd_reset_data_confirm(message: Message, state: FSMContext):
                     os.remove(path)
             except Exception as e:
                 log.warning("Не вдалось видалити %s: %s", path, e)
-    if os.path.exists(config.DASHBOARD_PATH):
-        os.remove(config.DASHBOARD_PATH)
+    for name in os.listdir(config.DATA_DIR):
+        if name.startswith("dashboard_") and name.endswith(".xlsx"):
+            try:
+                os.remove(os.path.join(config.DATA_DIR, name))
+            except Exception as e:
+                log.warning("Не вдалось видалити %s: %s", name, e)
 
     await state.clear()
     await message.answer("✅ Базу та локальні файли очищено. Можна тестувати заново — /start для реєстрації водія.")

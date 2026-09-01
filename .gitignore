@@ -9,6 +9,7 @@ __pycache__/
 # локальні дані рейсів (база, фото, звіти) — не для git,
 # на Render зберігаються на persistent disk
 data/*.db
+data/*.xlsx
 data/photos/*
 data/reports/*
 !data/photos/.gitkeep

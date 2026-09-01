@@ -23,3 +23,5 @@ services:
         sync: false
       - key: MS_SHARE_URL
         sync: false
+      - key: PROJECTS_JSON
+        sync: false
