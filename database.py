@@ -186,10 +186,30 @@ def complete_step(trip_id, step_id):
         )
 
 
-def finish_trip(trip_id, report_path=None, onedrive_url=None):
+def mark_trip_finished(trip_id):
+    """Позначає рейс завершеним (статус + час) — викликається ПЕРЕД тим,
+    як формується звіт, щоб звіт вже бачив фінальний статус і дату."""
     with _lock, _conn() as conn:
         conn.execute(
-            """UPDATE trips SET status='done', finished_at=?, report_path=?, onedrive_report_url=?
+            "UPDATE trips SET status='done', finished_at=? WHERE id=? AND finished_at IS NULL",
+            (now(), trip_id),
+        )
+
+
+def set_trip_report(trip_id, report_path=None, onedrive_url=None):
+    with _lock, _conn() as conn:
+        conn.execute(
+            "UPDATE trips SET report_path=?, onedrive_report_url=? WHERE id=?",
+            (report_path, onedrive_url, trip_id),
+        )
+
+
+def finish_trip(trip_id, report_path=None, onedrive_url=None):
+    """Лишається для сумісності: позначає завершеним і одразу проставляє
+    шлях до звіту одним викликом."""
+    with _lock, _conn() as conn:
+        conn.execute(
+            """UPDATE trips SET status='done', finished_at=COALESCE(finished_at, ?), report_path=?, onedrive_report_url=?
                WHERE id=?""",
             (now(), report_path, onedrive_url, trip_id),
         )
@@ -216,6 +236,32 @@ def toggle_item(trip_id, step_id, item_key):
                 (trip_id, step_id, item_key, now()),
             )
             return True
+
+
+def toggle_group(trip_id, step_id, item_keys):
+    """Атомарно перемикає одразу декілька пунктів (об'єднану групу в UI).
+    Якщо всі вже відмічені — знімає відмітку з усіх, інакше відмічає всі."""
+    with _lock, _conn() as conn:
+        placeholders = ",".join("?" * len(item_keys))
+        rows = conn.execute(
+            f"SELECT item_key, checked_at FROM checklist_answers WHERE trip_id=? AND item_key IN ({placeholders})",
+            (trip_id, *item_keys),
+        ).fetchall()
+        checked_map = {r["item_key"]: r["checked_at"] for r in rows}
+        all_checked = all(checked_map.get(k) for k in item_keys)
+        ts = None if all_checked else now()
+        for k in item_keys:
+            if k in checked_map:
+                conn.execute(
+                    "UPDATE checklist_answers SET checked_at=? WHERE trip_id=? AND item_key=?",
+                    (ts, trip_id, k),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO checklist_answers (trip_id, step_id, item_key, checked_at) VALUES (?,?,?,?)",
+                    (trip_id, step_id, k, ts),
+                )
+        return ts is not None  # True якщо тепер відмічено, False якщо зняли відмітку
 
 
 def mark_item_checked(trip_id, step_id, item_key):

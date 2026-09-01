@@ -33,6 +33,7 @@ import onedrive
 from checklists import (
     STEPS_BY_ID, PERMANENT_RULES,
     PAUSE_EVENT, EXTRA_STOP_EVENT, next_step_id,
+    is_first_step_of_phase, PHASE_LABELS,
 )
 from states import Registration, NewTrip, Checklist, Incident, OptionalEvent
 
@@ -66,6 +67,33 @@ async def show_step(target_message: Message, trip_id: int, step_id: str, edit: b
     await target_message.answer(text, reply_markup=markup)
 
 
+async def show_step_or_gate(target_message: Message, trip_id: int, step_id: str, edit: bool = False):
+    """Якщо це перший крок НОВОЇ фази (Старт/Стоп/Вивантаження) і водій ще
+    не відмітив жодного пункту — спершу показуємо коротке підтвердження
+    "Розпочати етап", а не одразу довгий чек-лист. Це природна пауза для
+    випадків, коли між фазами минають години (завантажились — і тільки
+    за 4-5 годин виїзд)."""
+    checked = db.get_checked_keys(trip_id)
+    step = STEPS_BY_ID[step_id]
+    step_keys = {i["key"] for i in step["items"]}
+    started = bool(step_keys & checked)
+
+    if is_first_step_of_phase(step_id) and not started:
+        phase_label = PHASE_LABELS[step["phase"]]
+        text = f"Наступний етап — <b>{phase_label}</b>.\nНатисніть, коли будете готові його розпочати."
+        markup = kb.phase_gate_keyboard(step_id)
+        if edit:
+            try:
+                await target_message.edit_text(text, reply_markup=markup)
+                return
+            except Exception:
+                pass
+        await target_message.answer(text, reply_markup=markup)
+        return
+
+    await show_step(target_message, trip_id, step_id, edit=edit)
+
+
 async def notify_managers(bot: Bot, text: str, document_path: str | None = None):
     for chat_id in config.MANAGER_CHAT_IDS:
         try:
@@ -77,9 +105,10 @@ async def notify_managers(bot: Bot, text: str, document_path: str | None = None)
 
 
 async def finalize_trip(bot: Bot, trip_id: int):
+    db.mark_trip_finished(trip_id)  # спершу статус/дата — щоб звіт вже бачив фінальний стан
     report_path = reports.build_trip_report(trip_id)
     onedrive_url = onedrive.upload_trip_report(trip_id, report_path)
-    db.finish_trip(trip_id, report_path=report_path, onedrive_report_url=onedrive_url)
+    db.set_trip_report(trip_id, report_path=report_path, onedrive_url=onedrive_url)
     onedrive.update_dashboard_row(trip_id, onedrive_url)
 
     trip = db.get_trip(trip_id)
@@ -198,7 +227,7 @@ async def cb_continue_trip(call: CallbackQuery, state: FSMContext):
     if not trip["rules_ack_at"]:
         await call.message.edit_text(permanent_rules_text(), reply_markup=kb.rules_ack_keyboard())
     else:
-        await show_step(call.message, trip["id"], trip["current_step"], edit=True)
+        await show_step_or_gate(call.message, trip["id"], trip["current_step"], edit=True)
     await call.answer()
 
 
@@ -306,7 +335,7 @@ async def cb_rules_ack(call: CallbackQuery, state: FSMContext):
     db.ack_rules(trip["id"])
     await state.clear()
     await call.message.edit_text("Рейс розпочато! Йдемо по чек-листу крок за кроком. 👇")
-    await show_step(call.message, trip["id"], trip["current_step"])
+    await show_step(call.message, trip["id"], trip["current_step"])  # loading_1 — гейт тут зайвий, старт уже підтверджено
     await call.answer()
 
 
@@ -321,25 +350,26 @@ async def cb_noop(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("chk:"))
 async def cb_toggle_item(call: CallbackQuery, state: FSMContext):
-    _, step_id, item_key = call.data.split(":", 2)
+    _, step_id, group_key = call.data.split(":", 2)
     driver = db.get_driver_by_tg(call.from_user.id)
     trip = db.get_active_trip_for_driver(driver["id"])
     if not trip:
         await call.answer("Рейс не знайдено.", show_alert=True)
         return
 
-    item = next(i for i in STEPS_BY_ID[step_id]["items"] if i["key"] == item_key)
+    group = next(g for g in STEPS_BY_ID[step_id]["groups"] if g["key"] == group_key)
     checked = db.get_checked_keys(trip["id"])
-    already_done = item_key in checked
+    already_done = all(k in checked for k in group["items"])
 
-    if item["photo"] and not already_done:
+    if group["photo"] and not already_done:
+        item_key = group["items"][0]  # фото-групи завжди містять рівно один пункт
         await state.set_state(Checklist.waiting_photo_for_item)
         await state.update_data(trip_id=trip["id"], step_id=step_id, item_key=item_key)
         await call.answer()
-        await call.message.answer(f"📷 Надішліть, будь ласка, фото для пункту:\n«{item['text']}»")
+        await call.message.answer(f"📷 Надішліть, будь ласка, фото:\n«{group['label']}»")
         return
 
-    db.toggle_item(trip["id"], step_id, item_key)
+    db.toggle_group(trip["id"], step_id, group["items"])
     await show_step(call.message, trip["id"], step_id, edit=True)
     await call.answer()
 
@@ -382,13 +412,29 @@ async def cb_next_step(call: CallbackQuery):
 
     if nxt:
         db.set_trip_step(trip["id"], nxt)
-        await call.message.edit_text(f"«{STEPS_BY_ID[step_id]['title']}» завершено ✅\nПереходимо далі 👇")
-        await show_step(call.message, trip["id"], nxt)
+        await call.message.edit_text(f"«{STEPS_BY_ID[step_id]['title']}» завершено ✅")
+        await show_step_or_gate(call.message, trip["id"], nxt)
     else:
         await call.message.edit_text("Останній етап завершено ✅\nФормую підсумковий звіт і надсилаю менеджеру...")
         await finalize_trip(call.bot, trip["id"])
-        await call.message.answer("🎉 Рейс повністю завершено. Дякую за чітку роботу за чек-листом!")
-        await show_main_menu(call.message, driver["id"])
+        await call.message.answer(
+            "🎉 Рейс повністю завершено. Дякую за чітку роботу за чек-листом!\n\n"
+            "Щоб почати новий рейс — натисніть кнопку нижче.",
+            reply_markup=kb.main_menu_keyboard(False),
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("begin:"))
+async def cb_begin_phase(call: CallbackQuery):
+    """Водій натиснув 'Розпочати цей етап' на екрані-паузі між фазами."""
+    step_id = call.data.split(":", 1)[1]
+    driver = db.get_driver_by_tg(call.from_user.id)
+    trip = db.get_active_trip_for_driver(driver["id"])
+    if not trip:
+        await call.answer("Рейс не знайдено.", show_alert=True)
+        return
+    await show_step(call.message, trip["id"], step_id, edit=True)
     await call.answer()
 
 

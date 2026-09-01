@@ -17,15 +17,21 @@ def optional_actions_row(kb: InlineKeyboardBuilder):
     )
 
 
+def phase_gate_keyboard(step_id: str):
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="▶️ Розпочати цей етап", callback_data=f"begin:{step_id}"))
+    return kb.as_markup()
+
+
 def step_keyboard(step_id: str, checked_keys, all_done: bool):
     step = STEPS_BY_ID[step_id]
     kb = InlineKeyboardBuilder()
 
-    for item in step["items"]:
-        key = item["key"]
-        done = key in checked_keys
-        prefix = "✅" if done else ("📷" if item["photo"] else "⬜")
-        kb.row(InlineKeyboardButton(text=_truncate(f"{prefix} {item['text']}"), callback_data=f"chk:{step_id}:{key}"))
+    for group in step["groups"]:
+        done = all(k in checked_keys for k in group["items"])
+        prefix = "✅" if done else ("📷" if group["photo"] else "⬜")
+        label = _truncate(f"{prefix} {group['label']}")
+        kb.row(InlineKeyboardButton(text=label, callback_data=f"chk:{step_id}:{group['key']}"))
 
     if all_done:
         kb.row(InlineKeyboardButton(text="➡️ Далі", callback_data=f"next:{step_id}"))
