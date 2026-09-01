@@ -277,8 +277,8 @@ async def cb_cargo_decision(call: CallbackQuery, state: FSMContext):
     driver = db.get_driver_by_tg(call.from_user.id)
     choice = call.data.split(":", 1)[1]
     if choice == "same":
-        await state.update_data(cargo=driver["last_cargo"], route=driver["last_route"] or "")
-        await finalize_new_trip(call.message, call.from_user.id, state)
+        await state.update_data(cargo=driver["last_cargo"])
+        await proceed_to_route_step(call.message, state, driver)
     else:
         await call.message.edit_text("Опишіть вантаж (тип, вага/габарити, особливості):")
         await state.set_state(NewTrip.waiting_new_cargo)
@@ -288,8 +288,36 @@ async def cb_cargo_decision(call: CallbackQuery, state: FSMContext):
 @router.message(NewTrip.waiting_new_cargo)
 async def new_cargo(message: Message, state: FSMContext):
     await state.update_data(cargo=message.text.strip())
-    await message.answer("Вкажіть маршрут (звідки-куди), або «-» якщо ще невідомо:")
-    await state.set_state(NewTrip.waiting_route)
+    driver = db.get_driver_by_tg(message.from_user.id)
+    await proceed_to_route_step(message, state, driver)
+
+
+async def proceed_to_route_step(target: Message, state: FSMContext, driver):
+    """Маршрут питаємо ЗАВЖДИ окремим кроком — незалежно від того, що
+    обрали по вантажу (раніше маршрут мовчки "прилипав" до рішення про
+    вантаж, це плутало)."""
+    if driver["last_route"]:
+        await target.answer(
+            "Маршрут такий самий, як минулого разу?",
+            reply_markup=kb.route_decision_keyboard(driver["last_route"]),
+        )
+        await state.set_state(NewTrip.waiting_route_decision)
+    else:
+        await target.answer("Вкажіть маршрут (звідки-куди), або «-» якщо ще невідомо:")
+        await state.set_state(NewTrip.waiting_route)
+
+
+@router.callback_query(NewTrip.waiting_route_decision, F.data.startswith("route:"))
+async def cb_route_decision(call: CallbackQuery, state: FSMContext):
+    driver = db.get_driver_by_tg(call.from_user.id)
+    choice = call.data.split(":", 1)[1]
+    if choice == "same":
+        await state.update_data(route=driver["last_route"])
+        await finalize_new_trip(call.message, call.from_user.id, state)
+    else:
+        await call.message.edit_text("Вкажіть маршрут (звідки-куди), або «-» якщо ще невідомо:")
+        await state.set_state(NewTrip.waiting_route)
+    await call.answer()
 
 
 @router.message(NewTrip.waiting_route)

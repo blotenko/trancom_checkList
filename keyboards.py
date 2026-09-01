@@ -66,6 +66,14 @@ def cargo_decision_keyboard(cargo, route):
     return kb.as_markup()
 
 
+def route_decision_keyboard(route):
+    label = route if len(route) <= 40 else route[:37] + "..."
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text=f"🗺️ Той самий маршрут: {label}", callback_data="route:same"))
+    kb.row(InlineKeyboardButton(text="✏️ Інший маршрут", callback_data="route:other"))
+    return kb.as_markup()
+
+
 def main_menu_keyboard(has_active_trip: bool):
     kb = InlineKeyboardBuilder()
     if has_active_trip:

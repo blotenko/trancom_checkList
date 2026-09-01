@@ -13,6 +13,7 @@ class NewTrip(StatesGroup):
     waiting_new_trailer = State()
     waiting_cargo_decision = State()     # "той самий вантаж" / "інший"
     waiting_new_cargo = State()
+    waiting_route_decision = State()     # "той самий маршрут" / "інший"
     waiting_route = State()
 
 
