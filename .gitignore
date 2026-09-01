@@ -1,0 +1,15 @@
+# venv / cache
+venv/
+__pycache__/
+*.pyc
+
+# секрети — ніколи не комітяться
+.env
+
+# локальні дані рейсів (база, фото, звіти) — не для git,
+# на Render зберігаються на persistent disk
+data/*.db
+data/photos/*
+data/reports/*
+!data/photos/.gitkeep
+!data/reports/.gitkeep
