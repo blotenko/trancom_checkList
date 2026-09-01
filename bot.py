@@ -16,6 +16,7 @@ import logging
 import os
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -565,7 +566,7 @@ async def main():
         raise SystemExit("Не задано BOT_TOKEN у .env — див. README.md")
 
     db.init_db()
-    bot = Bot(token=config.BOT_TOKEN, parse_mode="HTML")
+    bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
