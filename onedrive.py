@@ -151,13 +151,45 @@ def upload_file(local_path: str, remote_subpath: str, project_key: str) -> str |
     return None
 
 
-def _ensure_local_dashboard(path: str):
-    if not os.path.exists(path):
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Рейси"
-        ws.append(DASHBOARD_HEADERS)
-        wb.save(path)
+def _download_file(remote_subpath: str, project_key: str, local_dest_path: str) -> bool:
+    """Тягне файл з OneDrive проєкту на локальний шлях. Повертає True, якщо
+    вдалось (файл існує і завантажений), False якщо файлу немає або стався збій."""
+    if not config.ONEDRIVE_ENABLED or not project_key or project_key not in config.PROJECTS_BY_KEY:
+        return False
+    try:
+        token = _get_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        drive_id, item_id = _resolve_project_folder(headers, project_key)
+        remote_subpath = remote_subpath.replace("//", "/").lstrip("/")
+        url = f"{GRAPH_ROOT}/drives/{drive_id}/items/{item_id}:/{remote_subpath}:/content"
+        resp = requests.get(url, headers=headers, timeout=60)
+        if resp.status_code == 404:
+            return False
+        resp.raise_for_status()
+        with open(local_dest_path, "wb") as f:
+            f.write(resp.content)
+        return True
+    except Exception as e:
+        log.warning("Не вдалось завантажити %s з OneDrive [%s]: %s", remote_subpath, project_key, e)
+        return False
+
+
+def _ensure_local_dashboard(path: str, project_key: str):
+    if os.path.exists(path):
+        return
+    # Локального файлу немає (перший запуск, скинута база для тестів, чи
+    # взагалі втрачений диск) — ПЕРШ НІЖ створювати порожній файл з нуля,
+    # пробуємо стягнути актуальну версію з OneDrive. Без цього кроку
+    # наступне збереження перезаписало б реальну таблицю на OneDrive
+    # порожньою, стерши всі попередні рейси, яких немає локально.
+    if _download_file("dashboard.xlsx", project_key, path):
+        log.info("OneDrive: локального dashboard.xlsx не було — відновив з хмари (проєкт %s)", project_key)
+        return
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Рейси"
+    ws.append(DASHBOARD_HEADERS)
+    wb.save(path)
 
 
 def update_dashboard_row(trip_id: int, onedrive_report_url: str | None):
@@ -167,7 +199,7 @@ def update_dashboard_row(trip_id: int, onedrive_report_url: str | None):
     trip = db.get_trip(trip_id)
     project_key = trip["project_key"]
     dash_path = config.dashboard_path(project_key)
-    _ensure_local_dashboard(dash_path)
+    _ensure_local_dashboard(dash_path, project_key)
 
     driver = db.get_driver(trip["driver_id"])
     incidents = db.get_incidents(trip_id)
