@@ -407,22 +407,52 @@ async def cb_next_step(call: CallbackQuery):
         await call.answer("Рейс не знайдено.", show_alert=True)
         return
 
+    # Захист від подвійного натискання (два тапи поки перший ще обробляється) —
+    # без цього можна двічі запустити фіналізацію того самого рейсу і отримати
+    # два одночасні аплоади в той самий файл на OneDrive (звідси і 423 Locked).
+    if trip["current_step"] != step_id:
+        await call.answer("Цей крок вже оброблено ✅")
+        return
+
     db.complete_step(trip["id"], step_id)
     nxt = next_step_id(step_id)
 
     if nxt:
         db.set_trip_step(trip["id"], nxt)
+        await call.answer()
         await call.message.edit_text(f"«{STEPS_BY_ID[step_id]['title']}» завершено ✅")
         await show_step_or_gate(call.message, trip["id"], nxt)
     else:
+        # Останній крок: формування звіту й завантаження на OneDrive може
+        # тривати довго (ретраї на тимчасові помилки Graph API). Якщо чекати
+        # на це в самому хендлері callback — Telegram визнає запит застарілим
+        # ("query is too old") ще до завершення. Тому відповідаємо одразу,
+        # а важку роботу виносимо у фонову задачу.
+        db.set_trip_step(trip["id"], step_id)  # про всяк випадок, щоб гейт не спрацював повторно
+        await call.answer()
         await call.message.edit_text("Останній етап завершено ✅\nФормую підсумковий звіт і надсилаю менеджеру...")
-        await finalize_trip(call.bot, trip["id"])
-        await call.message.answer(
+        asyncio.create_task(_finalize_trip_background(call.bot, call.message.chat.id, trip["id"], driver["id"]))
+
+
+async def _finalize_trip_background(bot: Bot, chat_id: int, trip_id: int, driver_id: int):
+    """Фонове завершення рейсу: не тримає Telegram callback відкритим,
+    поки триває (потенційно повільне) завантаження звіту на OneDrive."""
+    try:
+        await finalize_trip(bot, trip_id)
+        await bot.send_message(
+            chat_id,
             "🎉 Рейс повністю завершено. Дякую за чітку роботу за чек-листом!\n\n"
             "Щоб почати новий рейс — натисніть кнопку нижче.",
             reply_markup=kb.main_menu_keyboard(False),
         )
-    await call.answer()
+    except Exception as e:
+        log.error("Помилка фонової фіналізації рейсу %s: %s", trip_id, e)
+        await bot.send_message(
+            chat_id,
+            "🎉 Рейс завершено, дані збережені. Зі звітом виникла тимчасова затримка "
+            "(менеджер отримає його трохи пізніше).\n\nЩоб почати новий рейс — натисніть кнопку нижче.",
+            reply_markup=kb.main_menu_keyboard(False),
+        )
 
 
 @router.callback_query(F.data.startswith("begin:"))
