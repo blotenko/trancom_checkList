@@ -106,6 +106,27 @@ def init_db():
         )
 
 
+def wipe_all_data():
+    """Повне очищення бази (рейси, фото, водії) — для чистого повторного
+    тестування. Файли, вже завантажені на OneDrive, НЕ видаляються —
+    тільки локальна база бота. Скидає й лічильники id (наступний рейс
+    знову почнеться з №1)."""
+    with _lock, _conn() as conn:
+        for table in (
+            "photos", "incidents", "optional_events",
+            "checklist_answers", "step_progress", "trips",
+            "drivers", "fsm_storage",
+        ):
+            try:
+                conn.execute(f"DELETE FROM {table}")
+            except sqlite3.OperationalError:
+                pass  # таблиця може не існувати (fsm_storage створюється окремим модулем)
+        try:
+            conn.execute("DELETE FROM sqlite_sequence")
+        except sqlite3.OperationalError:
+            pass
+
+
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 

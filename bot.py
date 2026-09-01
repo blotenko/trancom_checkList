@@ -17,7 +17,7 @@ import os
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from fsm_storage import SQLiteStorage
 from aiogram.types import (
@@ -35,7 +35,7 @@ from checklists import (
     PAUSE_EVENT, EXTRA_STOP_EVENT, next_step_id,
     is_first_step_of_phase, PHASE_LABELS,
 )
-from states import Registration, NewTrip, Checklist, Incident, OptionalEvent
+from states import Registration, NewTrip, Checklist, Incident, OptionalEvent, AdminReset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("trancom_bot")
@@ -631,6 +631,59 @@ async def finish_incident(message: Message, trip_id: int, context_step: str, des
     await notify_managers(message.bot, text, document_path=photo_path)
     await message.answer("Дякую, менеджера повідомлено. Продовжуємо чек-лист 👇")
     await show_step(message, trip_id, trip["current_step"])
+
+
+# ---------------------------------------------------------------------------
+# Адмін: очищення бази для повторного тестування (тільки для менеджерів)
+# ---------------------------------------------------------------------------
+
+@router.message(Command("reset_data"))
+async def cmd_reset_data(message: Message, state: FSMContext):
+    if message.from_user.id not in config.MANAGER_CHAT_IDS:
+        return  # тихо ігноруємо — команда не для водіїв
+    await message.answer(
+        "⚠️ Це видалить УСІ дані з бази бота: усіх водіїв, усі рейси, фото, "
+        "чек-листи, паузи та ЧП. Лічильник рейсів почнеться знову з №1.\n\n"
+        "Файли, вже завантажені на OneDrive, це НЕ зачіпає — видаляється "
+        "тільки локальна база самого бота.\n\n"
+        "Щоб підтвердити, надішліть текстом: ТАК ВИДАЛИТИ"
+    )
+    await state.set_state(AdminReset.waiting_confirm)
+
+
+@router.message(AdminReset.waiting_confirm, F.text == "ТАК ВИДАЛИТИ")
+async def cmd_reset_data_confirm(message: Message, state: FSMContext):
+    if message.from_user.id not in config.MANAGER_CHAT_IDS:
+        await state.clear()
+        return
+    db.wipe_all_data()
+
+    # локальні файли теж чистимо, щоб старі photos/reports/dashboard.xlsx
+    # не "воскресли" і не полетіли повторно на OneDrive
+    import shutil
+    for folder in (config.PHOTOS_DIR, config.REPORTS_DIR):
+        for name in os.listdir(folder):
+            path = os.path.join(folder, name)
+            if name == ".gitkeep":
+                continue
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+            except Exception as e:
+                log.warning("Не вдалось видалити %s: %s", path, e)
+    if os.path.exists(config.DASHBOARD_PATH):
+        os.remove(config.DASHBOARD_PATH)
+
+    await state.clear()
+    await message.answer("✅ Базу та локальні файли очищено. Можна тестувати заново — /start для реєстрації водія.")
+
+
+@router.message(AdminReset.waiting_confirm)
+async def cmd_reset_data_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Скасовано, дані НЕ видалені.")
 
 
 # ---------------------------------------------------------------------------

@@ -29,3 +29,7 @@ class OptionalEvent(StatesGroup):
     filling = State()          # чекбокси паузи в пам'яті (FSM), не в БД
     waiting_note = State()     # причина додаткової зупинки
     waiting_photo = State()    # необов'язкове фото до події
+
+
+class AdminReset(StatesGroup):
+    waiting_confirm = State()
