@@ -19,7 +19,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
+from fsm_storage import SQLiteStorage
 from aiogram.types import (
     Message, CallbackQuery, FSInputFile,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
@@ -613,7 +613,7 @@ async def main():
 
     db.init_db()
     bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(storage=SQLiteStorage())
     dp.include_router(router)
 
     log.info("Бот запущено. OneDrive: %s", "увімкнено" if config.ONEDRIVE_ENABLED else "вимкнено (тільки локально)")
